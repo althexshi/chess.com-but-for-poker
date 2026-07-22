@@ -1,0 +1,47 @@
+[
+    {
+        "board": "Ah Kd 7c",
+        "hole_cards": "QsJs",
+        "position": "BTN",
+        "pot_size": 12.0,
+        "stack_size": 100.0,
+        "opponent_action": "One player raised",
+        "gto_strategy": {"raise": 15.0, "call": 55.0, "fold": 30.0}
+    },
+    {
+        "board": "Ts 9s 2h",
+        "hole_cards": "AsKs",
+        "position": "CO",
+        "pot_size": 8.5,
+        "stack_size": 95.0,
+        "opponent_action": "Everyone folded",
+        "gto_strategy": {"raise": 72.0, "call": 18.0, "fold": 10.0}
+    },
+    {
+        "board": "Jh Tc 4d",
+        "hole_cards": "9h8h",
+        "position": "BB",
+        "pot_size": 15.0,
+        "stack_size": 80.0,
+        "opponent_action": "One player called",
+        "gto_strategy": {"check": 40.0, "bet": 45.0, "fold": 15.0}
+    },
+    {
+        "board": "Ac Qd 5s",
+        "hole_cards": "AhKc",
+        "position": "UTG",
+        "pot_size": 6.0,
+        "stack_size": 150.0,
+        "opponent_action": "Everyone folded",
+        "gto_strategy": {"raise": 85.0, "call": 12.0, "fold": 3.0}
+    },
+    {
+        "board": "7d 6d 2c",
+        "hole_cards": "5d4d",
+        "position": "SB",
+        "pot_size": 20.0,
+        "stack_size": 60.0,
+        "opponent_action": "Raise and re-raise",
+        "gto_strategy": {"raise": 35.0, "call": 40.0, "fold": 25.0}
+    }
+]
