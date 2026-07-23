@@ -1,7 +1,7 @@
 import pandas as pd
 import seaborn as sns
 from highlight_text import ax_text
-from poker_coach.config import DATA_COLUMNS,KPI_TEXT_PROPS
+from poker_coach.config import DATA_COLUMNS
 
 #Helper function to analyze data with colors to visually compare the data. 
 def rainbow(data, n=None, mode=None):

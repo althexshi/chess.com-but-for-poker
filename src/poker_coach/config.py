@@ -8,6 +8,10 @@ from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parents[2] / "Data"
 
 BUSTABIT_DATA_FILE = DATA_DIR / "bustabit.csv"
+PLAYER_STATS_FILE = DATA_DIR / "player_stats.csv"
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+RISK_SCREENER_MODEL_FILE = MODELS_DIR / "xgboost_risk_screener.pkl"
 
 #Bustabit data scheme and columns
 DATA_COLUMNS = ['Bet','CashedOut', 'Bonus', 'Profit', 'BustedAt']
