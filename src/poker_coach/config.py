@@ -1,7 +1,12 @@
 from pathlib import Path
 
 # These are the file paths used
+# __file__ — the location of config.py itself
+# .resolve() — get the full absolute path
+# .parents[2] — go up two folders (from config.py → poker_coach → src → project root)
+# / "Data" — then go into the Data folder
 DATA_DIR = Path(__file__).resolve().parents[2] / "Data"
+
 BUSTABIT_DATA_FILE = DATA_DIR / "bustabit.csv"
 
 #Bustabit data scheme and columns
@@ -20,7 +25,3 @@ ROSY_GRANITE = "#887880"
 KHAKI_BEIGE = "#BBAB8B"
 SWEET_SALMON = "#ef8275"
 
-KPI_TEXT_PROPS = [
-    {"color": "blue", "fontweight": "bold"},  # ex. in loss_chasing_analysis color applied to (Statistic) in the chart
-    {"color": "red", "fontweight": "bold"}   # in loss_chasing_analysis color applied to (P-Value) in chart
-]
