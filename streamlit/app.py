@@ -1,7 +1,9 @@
-import random
 import time
 
+import httpx
 import streamlit as st
+
+API_BASE = "http://127.0.0.1:8000"
 
 
 # =========================================================
@@ -19,17 +21,16 @@ st.set_page_config(
 # =========================================================
 def initialize_session() -> None:
     defaults = {
-        "hand": "AA",
-        "position": "UTG",
-        "opponent_action": "Everyone folded",
-        "stack_size": 100,
-        "pot_size": 10.0,
-        "call_amount": 2.5,
+        "username": "",
+        "logged_in": False,
+        "scenario": None,
+        "user_action": None,
+        "action_start_time": None,
+        "last_result": None,
+        "show_result": False,
         "scenarios_completed": 0,
         "session_start": time.time(),
-        "aggressive_recommendations": 0,
-        "last_recommendation": None,
-        "show_result": False,
+        "verdicts": [],
     }
 
     for key, value in defaults.items():
@@ -111,12 +112,45 @@ st.markdown(
         margin-bottom: 1rem;
     }
 
-    .recommendation-card {
+    .coaching-card {
         padding: 1.2rem;
         border-radius: 16px;
+        margin-top: 1rem;
+    }
+    .coaching-good {
         border: 1px solid rgba(34,197,94,0.35);
         background: rgba(34,197,94,0.08);
-        margin-top: 1rem;
+    }
+    .coaching-okay {
+        border: 1px solid rgba(234,179,8,0.35);
+        background: rgba(234,179,8,0.08);
+    }
+    .coaching-mistake {
+        border: 1px solid rgba(239,68,68,0.35);
+        background: rgba(239,68,68,0.08);
+    }
+
+    .verdict-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 8px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        margin-right: 8px;
+    }
+    .verdict-good { background: #166534; color: #4ade80; }
+    .verdict-okay { background: #854d0e; color: #facc15; }
+    .verdict-mistake { background: #991b1b; color: #fca5a5; }
+
+    .concept-tag {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 6px;
+        background: rgba(99,102,241,0.15);
+        color: #a5b4fc;
+        font-size: 0.8rem;
+        font-weight: 600;
     }
 
     .playing-card {
@@ -142,20 +176,9 @@ st.markdown(
 # =========================================================
 # HELPERS
 # =========================================================
-HANDS = [
-    "AA", "KK", "QQ", "JJ", "TT", "99", "88", "77",
-    "AKs", "AKo", "AQs", "AQo", "AJs", "ATs",
-    "KQs", "KJs", "QJs", "JTs", "T9s", "QJo",
-]
-
 POSITIONS = ["UTG", "HJ", "CO", "BTN", "SB", "BB"]
 
-ACTIONS = [
-    "Everyone folded",
-    "One player called",
-    "One player raised",
-    "Raise and re-raise",
-]
+VERDICT_EMOJI = {"good": "✅", "okay": "⚠️", "mistake": "❌"}
 
 
 def seat_class(seat_name: str, selected_position: str) -> str:
@@ -165,121 +188,93 @@ def seat_class(seat_name: str, selected_position: str) -> str:
     return f"seat {base_class}"
 
 
-def split_hand_label(hand: str) -> tuple[str, str]:
-    return hand[0], hand[1]
+def parse_hole_cards(hole_cards: str) -> tuple[str, str, str, str]:
+    suits = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
+    card1_rank = hole_cards[0]
+    card1_suit = suits.get(hole_cards[1].lower(), "")
+    card2_rank = hole_cards[2]
+    card2_suit = suits.get(hole_cards[3].lower(), "") if len(hole_cards) > 3 else ""
+    return card1_rank, card1_suit, card2_rank, card2_suit
 
 
-def deal_practice_scenario() -> None:
-    st.session_state.hand = random.choice(HANDS)
-    st.session_state.position = random.choice(POSITIONS)
-    st.session_state.opponent_action = random.choice(ACTIONS)
-    st.session_state.stack_size = random.choice([20, 30, 50, 75, 100, 150])
-    st.session_state.pot_size = random.choice([3.0, 5.0, 7.5, 10.0, 15.0])
-    st.session_state.call_amount = random.choice([0.0, 1.0, 2.0, 2.5, 5.0])
-    st.session_state.show_result = False
-    st.session_state.last_recommendation = None
+def fetch_scenario() -> None:
+    try:
+        resp = httpx.get(f"{API_BASE}/api/scenarios/next", timeout=5.0)
+        resp.raise_for_status()
+        st.session_state.scenario = resp.json()
+        st.session_state.show_result = False
+        st.session_state.last_result = None
+        st.session_state.user_action = None
+        st.session_state.action_start_time = time.time()
+    except httpx.HTTPError as e:
+        st.error(f"Could not load scenario: {e}")
 
 
-def get_recommendation(
-    hand: str,
-    position: str,
-    opponent_action: str,
-    stack_size: int,
-) -> tuple[int, int, int, str, str]:
-    """
-    Temporary hardcoded poker logic.
+def submit_action(action: str) -> None:
+    scenario = st.session_state.scenario
+    if scenario is None:
+        return
 
-    Later, replace the inside of this function with the trained model.
-    """
-    premium_hands = {"AA", "KK", "QQ", "JJ", "AKs", "AKo"}
-    playable_hands = {
-        "TT", "99", "88", "77",
-        "AQs", "AQo", "AJs", "ATs",
-        "KQs", "KJs", "QJs", "JTs", "T9s",
-    }
-    late_positions = {"CO", "BTN"}
-
-    if hand in premium_hands:
-        raise_pct, call_pct, fold_pct = 78, 18, 4
-        recommendation = "Raise"
-        explanation = (
-            "This is a premium starting hand. Raising is usually reasonable, "
-            "although stack size and earlier action still matter."
+    response_time_ms = None
+    if st.session_state.action_start_time:
+        response_time_ms = int(
+            (time.time() - st.session_state.action_start_time) * 1000
         )
 
-    elif hand in playable_hands:
-        if (
-            position in late_positions
-            and opponent_action in {"Everyone folded", "One player called"}
-        ):
-            raise_pct, call_pct, fold_pct = 48, 37, 15
-            recommendation = "Raise or call"
-            explanation = (
-                "This hand is more playable from a later position because you "
-                "have more information about the other players."
-            )
-        else:
-            raise_pct, call_pct, fold_pct = 28, 44, 28
-            recommendation = "Call or play carefully"
-            explanation = (
-                "This hand has potential, but earlier position or aggressive "
-                "opponent action makes it less comfortable."
-            )
+    prev_outcome = None
+    if st.session_state.verdicts:
+        prev_outcome = st.session_state.verdicts[-1]
 
-    else:
-        raise_pct, call_pct, fold_pct = 10, 20, 70
-        recommendation = "Fold or play carefully"
-        explanation = (
-            "This is a weaker starting hand in this simplified prototype."
+    try:
+        resp = httpx.post(
+            f"{API_BASE}/api/evaluate",
+            json={
+                "scenario_id": scenario["id"],
+                "username": st.session_state.username,
+                "action": action,
+                "response_time_ms": response_time_ms,
+                "prev_outcome": prev_outcome,
+            },
+            timeout=15.0,
         )
-
-    if opponent_action == "Raise and re-raise":
-        raise_pct = max(5, raise_pct - 15)
-        call_pct = max(10, call_pct - 5)
-        fold_pct = 100 - raise_pct - call_pct
-        explanation += " A raise and re-raise before your turn increases the risk."
-
-    if stack_size <= 25:
-        explanation += " Your stack is short, so short-stack strategy matters."
-
-    return raise_pct, call_pct, fold_pct, recommendation, explanation
-
-
-def analyze_scenario() -> None:
-    (
-        raise_pct,
-        call_pct,
-        fold_pct,
-        recommendation,
-        explanation,
-    ) = get_recommendation(
-        hand=st.session_state.hand,
-        position=st.session_state.position,
-        opponent_action=st.session_state.opponent_action,
-        stack_size=st.session_state.stack_size,
-    )
-
-    st.session_state.last_recommendation = {
-        "raise_pct": raise_pct,
-        "call_pct": call_pct,
-        "fold_pct": fold_pct,
-        "recommendation": recommendation,
-        "explanation": explanation,
-    }
-
-    st.session_state.scenarios_completed += 1
-
-    if recommendation in {"Raise", "Raise or call"}:
-        st.session_state.aggressive_recommendations += 1
-
-    st.session_state.show_result = True
+        resp.raise_for_status()
+        result = resp.json()
+        st.session_state.last_result = result
+        st.session_state.user_action = action
+        st.session_state.show_result = True
+        st.session_state.scenarios_completed += 1
+        st.session_state.verdicts.append(result["coaching"]["verdict"])
+    except httpx.HTTPError as e:
+        st.error(f"Evaluation failed: {e}")
 
 
 def reset_session() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-
     initialize_session()
+
+
+# =========================================================
+# LOGIN GATE
+# =========================================================
+if not st.session_state.logged_in:
+    st.markdown(
+        '<div class="main-title">♠️ Poker AI Coach</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="subtitle">Enter a username to start practicing.</div>',
+        unsafe_allow_html=True,
+    )
+    username = st.text_input("Username", max_chars=30)
+    if st.button("Start Training", type="primary"):
+        if username.strip():
+            st.session_state.username = username.strip()
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.warning("Please enter a username.")
+    st.stop()
 
 
 # =========================================================
@@ -291,6 +286,7 @@ st.markdown(
 )
 st.markdown(
     '<div class="subtitle">'
+    f"Playing as <strong>{st.session_state.username}</strong> · "
     "Practice poker decisions and review your session activity."
     "</div>",
     unsafe_allow_html=True,
@@ -303,62 +299,20 @@ coach_tab, session_tab = st.tabs(["Poker Coach", "My Session"])
 # SIDEBAR
 # =========================================================
 with st.sidebar:
-    st.header("Practice Settings")
+    st.header("Controls")
 
-    st.selectbox(
-        "Starting hand",
-        HANDS,
-        key="hand",
-        help="s = suited, o = offsuit",
-    )
-
-    st.selectbox(
-        "Your position",
-        POSITIONS,
-        key="position",
-    )
-
-    st.selectbox(
-        "Action before your turn",
-        ACTIONS,
-        key="opponent_action",
-    )
-
-    st.slider(
-        "Your stack size (big blinds)",
-        min_value=10,
-        max_value=200,
-        step=5,
-        key="stack_size",
-    )
-
-    st.number_input(
-        "Pot size (big blinds)",
-        min_value=0.0,
-        step=0.5,
-        key="pot_size",
-    )
-
-    st.number_input(
-        "Amount to call (big blinds)",
-        min_value=0.0,
-        step=0.5,
-        key="call_amount",
-    )
-
-    st.divider()
-
-    if st.button("Deal Practice Scenario", use_container_width=True):
-        deal_practice_scenario()
+    if st.button("Deal New Scenario", use_container_width=True, type="primary"):
+        fetch_scenario()
         st.rerun()
 
     if st.button("Reset Session", use_container_width=True):
         reset_session()
         st.rerun()
 
+    st.divider()
     st.caption(
-        "This is a practice simulator. The recommendation logic is temporary "
-        "and can later be replaced with the trained model."
+        f"Logged in as **{st.session_state.username}** · "
+        f"Scenarios completed: {st.session_state.scenarios_completed}"
     )
 
 
@@ -366,48 +320,45 @@ with st.sidebar:
 # POKER COACH TAB
 # =========================================================
 with coach_tab:
+    scenario = st.session_state.scenario
+
+    if scenario is None:
+        st.info("Click **Deal New Scenario** in the sidebar to begin.")
+        st.stop()
+
     left_col, right_col = st.columns([1.45, 1])
 
     with left_col:
         st.subheader("Table View")
 
+        position = scenario["position"]
+        pot_size = scenario["pot_size"]
+
         table_html = f"""
 <div class="poker-table">
-    <div class="{seat_class('CO', st.session_state.position)}">CO<br>100 bb</div>
-    <div class="{seat_class('HJ', st.session_state.position)}">HJ<br>100 bb</div>
-    <div class="{seat_class('BTN', st.session_state.position)}">BTN<br>100 bb</div>
-    <div class="{seat_class('UTG', st.session_state.position)}">UTG<br>100 bb</div>
-    <div class="{seat_class('BB', st.session_state.position)}">BB<br>99 bb</div>
-    <div class="{seat_class('SB', st.session_state.position)}">SB<br>99.5 bb</div>
-    <div class="pot">POT<br>{st.session_state.pot_size:.1f} bb</div>
+    <div class="{seat_class('CO', position)}">CO<br>100 bb</div>
+    <div class="{seat_class('HJ', position)}">HJ<br>100 bb</div>
+    <div class="{seat_class('BTN', position)}">BTN<br>100 bb</div>
+    <div class="{seat_class('UTG', position)}">UTG<br>100 bb</div>
+    <div class="{seat_class('BB', position)}">BB<br>99 bb</div>
+    <div class="{seat_class('SB', position)}">SB<br>99.5 bb</div>
+    <div class="pot">POT<br>{pot_size:.1f} bb</div>
 </div>
 """
         st.markdown(table_html, unsafe_allow_html=True)
 
-        card_one, card_two = split_hand_label(st.session_state.hand)
+        card1_rank, card1_suit, card2_rank, card2_suit = parse_hole_cards(
+            scenario["hole_cards"]
+        )
 
-        if st.session_state.hand.endswith("s"):
-            suited_text = "Suited"
-            first_suit = "♠"
-            second_suit = "♠"
-        elif st.session_state.hand.endswith("o"):
-            suited_text = "Offsuit"
-            first_suit = "♠"
-            second_suit = "♥"
-        else:
-            suited_text = "Pocket pair"
-            first_suit = "♠"
-            second_suit = "♥"
-
-        st.markdown("#### Your Starting Hand")
+        st.markdown("#### Your Hole Cards")
         st.markdown(
-            f"""
-<div class="playing-card">{card_one}<br><br>{first_suit}</div>
-<div class="playing-card">{card_two}<br><br>{second_suit}</div>
-""",
+            f'<div class="playing-card">{card1_rank}<br><br>{card1_suit}</div>'
+            f'<div class="playing-card">{card2_rank}<br><br>{card2_suit}</div>',
             unsafe_allow_html=True,
         )
-        st.caption(f"{st.session_state.hand} · {suited_text}")
+
+        st.markdown(f"**Board:** {scenario['board']}")
 
     with right_col:
         st.subheader("Decision Details")
@@ -415,69 +366,76 @@ with coach_tab:
         st.markdown(
             f"""
 <div class="info-card">
-    <strong>Position:</strong> {st.session_state.position}<br>
-    <strong>Opponent action:</strong> {st.session_state.opponent_action}<br>
-    <strong>Stack:</strong> {st.session_state.stack_size} big blinds<br>
-    <strong>Pot:</strong> {st.session_state.pot_size:.1f} big blinds<br>
-    <strong>Amount to call:</strong> {st.session_state.call_amount:.1f} big blinds
+    <strong>Position:</strong> {scenario['position']}<br>
+    <strong>Opponent action:</strong> {scenario['opponent_action']}<br>
+    <strong>Stack:</strong> {scenario['stack_size']:.0f} big blinds<br>
+    <strong>Pot:</strong> {scenario['pot_size']:.1f} big blinds
 </div>
 """,
             unsafe_allow_html=True,
         )
 
-        if st.button(
-            "Analyze Poker Decision",
-            type="primary",
-            use_container_width=True,
-        ):
-            analyze_scenario()
-            st.rerun()
+        if not st.session_state.show_result:
+            st.markdown("#### Choose your action:")
+            action_cols = st.columns(3)
+            with action_cols[0]:
+                if st.button("Raise", use_container_width=True):
+                    submit_action("raise")
+                    st.rerun()
+            with action_cols[1]:
+                if st.button("Call", use_container_width=True):
+                    submit_action("call")
+                    st.rerun()
+            with action_cols[2]:
+                if st.button("Fold", use_container_width=True):
+                    submit_action("fold")
+                    st.rerun()
 
-        if st.session_state.show_result and st.session_state.last_recommendation:
-            result = st.session_state.last_recommendation
+            actions_with_bet = ["check", "bet"]
+            extra_cols = st.columns(2)
+            with extra_cols[0]:
+                if st.button("Check", use_container_width=True):
+                    submit_action("check")
+                    st.rerun()
+            with extra_cols[1]:
+                if st.button("Bet", use_container_width=True):
+                    submit_action("bet")
+                    st.rerun()
 
-            st.markdown("### Action Mix")
+        if st.session_state.show_result and st.session_state.last_result:
+            result = st.session_state.last_result
+            comparison = result["comparison"]
+            coaching = result["coaching"]
+            gto = comparison["gto_strategy"]
 
-            st.write(f"Raise — {result['raise_pct']}%")
-            st.progress(result["raise_pct"] / 100)
+            st.markdown("### GTO Action Frequencies")
+            for action_name, freq in gto.items():
+                st.write(f"{action_name.capitalize()} — {freq:.0f}%")
+                st.progress(freq / 100)
 
-            st.write(f"Call — {result['call_pct']}%")
-            st.progress(result["call_pct"] / 100)
-
-            st.write(f"Fold — {result['fold_pct']}%")
-            st.progress(result["fold_pct"] / 100)
+            verdict = coaching["verdict"]
+            emoji = VERDICT_EMOJI.get(verdict, "")
+            card_class = f"coaching-{verdict}"
+            badge_class = f"verdict-{verdict}"
 
             st.markdown(
                 f"""
-<div class="recommendation-card">
-    <h3>Recommended action: {result['recommendation']}</h3>
-    <p>{result['explanation']}</p>
+<div class="coaching-card {card_class}">
+    <div style="margin-bottom: 8px;">
+        <span class="verdict-badge {badge_class}">{emoji} {verdict}</span>
+        <span class="concept-tag">{coaching['concept']}</span>
+    </div>
+    <p style="margin: 6px 0;"><strong>You chose:</strong> {st.session_state.user_action}</p>
+    <p style="margin: 6px 0;">{coaching['summary']}</p>
+    <p style="margin: 6px 0; opacity: 0.85;"><em>{coaching['advice']}</em></p>
 </div>
 """,
                 unsafe_allow_html=True,
             )
 
-            if st.session_state.call_amount > 0:
-                pot_odds = (
-                    st.session_state.call_amount
-                    / (
-                        st.session_state.pot_size
-                        + st.session_state.call_amount
-                    )
-                )
-                st.metric("Estimated pot odds", f"{pot_odds:.2%}")
-
-            with st.expander("What do these percentages mean?"):
-                st.write(
-                    "These are simplified hardcoded examples for the prototype. "
-                    "Later, they can be replaced by probabilities or strategy "
-                    "frequencies produced by the trained model."
-                )
-        else:
-            st.info(
-                "Choose a situation or click Deal Practice Scenario, then press "
-                "Analyze Poker Decision."
-            )
+            if st.button("Next Scenario →", type="primary", use_container_width=True):
+                fetch_scenario()
+                st.rerun()
 
 
 # =========================================================
@@ -490,39 +448,31 @@ with session_tab:
         (time.time() - st.session_state.session_start) / 60
     )
 
-    if st.session_state.scenarios_completed > 0:
-        aggressive_rate = (
-            st.session_state.aggressive_recommendations
-            / st.session_state.scenarios_completed
-        )
-    else:
-        aggressive_rate = 0
+    verdicts = st.session_state.verdicts
+    good_count = verdicts.count("good")
+    mistake_count = verdicts.count("mistake")
+    total = len(verdicts)
 
     metric1, metric2, metric3, metric4 = st.columns(4)
 
     with metric1:
-        st.metric(
-            "Scenarios analyzed",
-            st.session_state.scenarios_completed,
-        )
+        st.metric("Scenarios analyzed", total)
 
     with metric2:
-        st.metric(
-            "Session length",
-            f"{session_minutes} min",
-        )
+        st.metric("Session length", f"{session_minutes} min")
 
     with metric3:
-        st.metric(
-            "Aggressive recommendations",
-            st.session_state.aggressive_recommendations,
-        )
+        st.metric("Good decisions", good_count)
 
     with metric4:
-        st.metric(
-            "Aggressive rate",
-            f"{aggressive_rate:.0%}",
-        )
+        accuracy = f"{good_count / total:.0%}" if total > 0 else "—"
+        st.metric("Accuracy", accuracy)
+
+    if total > 0:
+        st.markdown("### Decision History")
+        for i, v in enumerate(reversed(verdicts), 1):
+            emoji = VERDICT_EMOJI.get(v, "")
+            st.write(f"{emoji} Scenario {total - i + 1}: **{v}**")
 
     st.markdown("### Current Session Status")
 
@@ -531,7 +481,7 @@ with session_tab:
             "You have been practicing for at least one hour. "
             "Consider taking a break."
         )
-    elif st.session_state.scenarios_completed >= 25:
+    elif total >= 25:
         st.warning(
             "You have completed many scenarios in one session. "
             "A short break may be helpful."
