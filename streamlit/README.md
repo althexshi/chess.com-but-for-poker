@@ -1,55 +1,32 @@
-# ♠️ Poker AI Coach — Streamlit Prototype
+# Poker Arena — Game + Learning Coach
 
-This folder contains the Streamlit front end for the Poker AI Coach project.
+This project contains two modes in one Streamlit application:
 
-The current version is a **poker decision-training prototype**, not a complete playable poker game. A user can choose a poker situation manually or generate a random practice scenario, then click **Analyze Poker Decision** to receive a temporary raise, call, or fold recommendation.
+- Vs Computer: play complete simplified heads-up Hold'em hands against a heuristic bot.
+- Multiplayer: create or join a room and play another person with WebSocket-driven live updates.
 
-The current recommendations use simplified hardcoded rules. When the team finishes the trained model, the recommendation function can be replaced with a model prediction while keeping the same Streamlit interface.
+The optional Learning Coach privately reviews each decision after it is made. It shows a decision score, suggested action, simplified action mix, estimated hand strength, pot odds, and an explanation. The percentages are educational heuristics and are not exact GTO solver outputs.
 
-## What the App Currently Does
+## Install
 
-The Streamlit app has two tabs:
+```powershell
+python -m pip install -r requirements.txt
+```
 
-### 1. Poker Coach
+## Run
 
-The user can:
+Terminal 1:
 
-- Select a starting hand
-- Select a table position
-- Select what happened before their turn
-- Enter stack size
-- Enter pot size
-- Enter the amount needed to call
-- Generate a random practice scenario
-- Analyze the decision
+```powershell
+python -m uvicorn backend:app --reload --port 8000
+```
 
-The app displays:
+Terminal 2:
 
-- The selected table position
-- Two visual starting cards
-- Raise percentage
-- Call percentage
-- Fold percentage
-- A recommended action
-- A short explanation
-- Estimated pot odds
+```powershell
+python -m streamlit run app.py
+```
 
-### 2. My Session
+For multiplayer testing, open the Streamlit URL in a normal browser window and an Incognito/InPrivate window. Create a room in one and join from the other.
 
-The app tracks:
-
-- Number of scenarios analyzed
-- Session length
-- Number of aggressive recommendations
-- Aggressive recommendation rate
-
-This session information is stored temporarily with Streamlit session state.
-
----
-
-## How to Run the App
-
-From the project root, run:
-
-```bash
-python -m streamlit run streamlit/app.py
+Set `POKER_API_URL` to your deployed FastAPI URL when deploying the frontend separately.
