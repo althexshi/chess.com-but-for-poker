@@ -1,497 +1,249 @@
-import time
-
-import httpx
+import io, itertools, random, time, os
+from collections import Counter
+from typing import List, Optional, Tuple
+import pandas as pd
+import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
-API_BASE = "http://127.0.0.1:8000"
+try: import joblib
+except ImportError: joblib=None
 
+st.set_page_config(page_title='Poker Arena',page_icon='♠️',layout='wide')
+API=os.getenv('POKER_API_URL','http://localhost:8000')
+WS=API.replace('http://','ws://').replace('https://','wss://')
+RANKS='23456789TJQKA'; SUITS='♠♥♦♣'; RV={r:i+2 for i,r in enumerate(RANKS)}
 
-# =========================================================
-# PAGE SETUP
-# =========================================================
-st.set_page_config(
-    page_title="Poker AI Coach",
-    page_icon="♠️",
-    layout="wide",
-)
+def card_html(c:Optional[str], hidden=False):
+    if hidden or c=='??': return '<div class="card back">♠</div>'
+    if not c:return '<div class="card empty"></div>'
+    cl='red' if c[1] in '♥♦' else 'black'; return f'<div class="card {cl}"><b>{c[0]}</b><span>{c[1]}</span></div>'
 
+st.markdown('''<style>
+.main-title{font-size:2.4rem;font-weight:850}.sub{color:#94a3b8}.table{background:radial-gradient(circle,#16834d,#075c38 72%);border:9px solid #5c3b22;border-radius:46%;padding:24px;min-height:390px}.cards,.board{display:flex;justify-content:center;gap:8px;min-height:92px}.board{margin:22px 0}.card{width:62px;height:88px;background:#fff;border-radius:9px;padding:7px;display:flex;flex-direction:column;justify-content:space-between;font-size:23px;box-shadow:0 6px 15px #0005}.red{color:#dc2626}.black{color:#111}.back{background:repeating-linear-gradient(45deg,#1e3a8a,#1e3a8a 8px,#2563eb 8px,#2563eb 16px);color:#fff;align-items:center;justify-content:center}.empty{background:#ffffff22;box-shadow:none}.name{text-align:center;color:white;font-weight:800}.pill{text-align:center;color:white}.status{padding:14px;border:1px solid #3b82f640;background:#3b82f615;border-radius:12px}.coach{padding:14px;border:1px solid #22c55e55;background:#22c55e12;border-radius:12px;margin-top:10px}
+</style>''',unsafe_allow_html=True)
+st.markdown('<div class="main-title">♠️ Poker Arena</div><div class="sub">Play against the computer or challenge another player live.</div>',unsafe_allow_html=True)
 
-# =========================================================
-# SESSION STATE
-# =========================================================
-def initialize_session() -> None:
-    defaults = {
-        "username": "",
-        "logged_in": False,
-        "scenario": None,
-        "user_action": None,
-        "action_start_time": None,
-        "last_result": None,
-        "show_result": False,
-        "scenarios_completed": 0,
-        "session_start": time.time(),
-        "verdicts": [],
-    }
+mode=st.sidebar.radio('Game mode',['🤖 Vs Computer','🌐 Multiplayer'])
+coach_on=st.sidebar.toggle('Learning coach',value=True,help='Shows private feedback after each decision.')
 
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+# ---------- VS COMPUTER (compact engine based on your existing version) ----------
+def init_bot():
+    d={'pstack':100.0,'bstack':100.0,'pot':0.0,'deck':[],'ph':[],'bh':[],'board':[],'street':'Preflop','to_call':0.0,'over':True,'show':False,'msg':'Press New Hand','hands':0,'wins':0,'raises':0,'calls':0,'folds':0,'start':time.time(),'history':[],'model':None,'model_name':None,'feedback':None,'decision_scores':[]}
+    for k,v in d.items():
+        if 'bot_'+k not in st.session_state: st.session_state['bot_'+k]=v
 
+def b(k): return st.session_state['bot_'+k]
+def bs(k,v): st.session_state['bot_'+k]=v
 
-initialize_session()
+def newdeck(): d=[r+s for r in RANKS for s in SUITS]; random.shuffle(d); return d
 
+def strength(h,b):
+    a,c=RV[h[0][0]],RV[h[1][0]]; s=(a+c)/28 + (0.3 if a==c else 0)+(0.07 if h[0][1]==h[1][1] else 0)
+    return min(1,s + (0.12*len(b) if b else 0))
 
-# =========================================================
-# STYLING
-# =========================================================
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 2.4rem;
-        font-weight: 800;
-        margin-bottom: 0.1rem;
-    }
+def coach_feedback(hole, board, pot, to_call, action, street):
+    hand_strength = strength(hole, board)
+    pot_odds = to_call / max(pot + to_call, 0.01) if to_call > 0 else 0.0
+    if to_call > 0:
+        fold = max(5, round((1-hand_strength)*70))
+        call = max(10, round(45-abs(hand_strength-pot_odds)*35))
+        raise_pct = max(5, 100-fold-call)
+    else:
+        fold = 0
+        raise_pct = max(10, round(hand_strength*70))
+        call = 100-raise_pct
+    mix={'Fold':fold,'Check/Call':call,'Bet/Raise':raise_pct}
+    normalized='Fold' if action=='fold' else ('Bet/Raise' if action=='bet' else 'Check/Call')
+    best=max(mix,key=mix.get)
+    freq=mix.get(normalized,0)
+    score=100 if normalized==best else 70 if freq>=25 else 35 if freq>=10 else 0
+    if hand_strength>=.70:
+        why='Your estimated hand strength is high, so aggressive actions usually gain more value.'
+    elif hand_strength>=.42:
+        why='This is a medium-strength spot where multiple actions can be reasonable.'
+    else:
+        why='Your estimated hand strength is low, so pot control and folding to pressure matter more.'
+    concept=(f'Calling requires roughly {pot_odds:.0%} equity from the pot odds.' if to_call>0 else 'Because no bet is facing you, checking controls the pot while betting applies pressure.')
+    return {'street':street,'chosen_action':normalized,'score':score,'best_action':best,'mix':mix,'pot_odds':pot_odds,'estimated_strength':hand_strength,'explanation':why+' '+concept}
 
-    .subtitle {
-        color: #9ca3af;
-        margin-bottom: 1.2rem;
-    }
+def show_learning(feedback, title='Decision Review'):
+    if not feedback:
+        st.info('Make a decision to receive coaching feedback.')
+        return
+    st.markdown(f'### {title}')
+    st.markdown(
+    f"""
+    <div class="decision-review-grid">
+        <div class="decision-review-card">
+            <div class="decision-review-label">Decision score</div>
+            <div class="decision-review-value">
+                {feedback['score']}/100
+            </div>
+        </div>
 
-    .poker-table {
-        width: 560px;
-        height: 320px;
-        border-radius: 50%;
-        background: radial-gradient(circle, #166534 0%, #064e3b 72%);
-        border: 7px solid #5b3a1f;
-        position: relative;
-        margin: 20px auto;
-        box-shadow: 0 0 30px rgba(0,0,0,0.45);
-    }
+        <div class="decision-review-card">
+            <div class="decision-review-label">Suggested action</div>
+            <div class="decision-review-value decision-action-value">
+                {feedback['best_action']}
+            </div>
+        </div>
 
-    .seat {
-        position: absolute;
-        background-color: #111827;
-        color: white;
-        padding: 10px 14px;
-        border-radius: 12px;
-        font-weight: bold;
-        text-align: center;
-        border: 2px solid #374151;
-        min-width: 72px;
-    }
-
-    .active-seat {
-        border: 3px solid #22c55e;
-        color: #22c55e;
-        box-shadow: 0 0 14px rgba(34,197,94,0.6);
-    }
-
-    .pot {
-        position: absolute;
-        top: 128px;
-        left: 220px;
-        color: white;
-        font-size: 22px;
-        font-weight: bold;
-        text-align: center;
-    }
-
-    .co { top: 18px; left: 235px; }
-    .hj { top: 100px; left: 35px; }
-    .btn { top: 100px; right: 35px; }
-    .utg { bottom: 35px; left: 95px; }
-    .bb { bottom: 22px; left: 240px; }
-    .sb { bottom: 35px; right: 95px; }
-
-    .info-card {
-        padding: 1rem;
-        border-radius: 14px;
-        border: 1px solid rgba(255,255,255,0.12);
-        background: rgba(255,255,255,0.04);
-        margin-bottom: 1rem;
-    }
-
-    .coaching-card {
-        padding: 1.2rem;
-        border-radius: 16px;
-        margin-top: 1rem;
-    }
-    .coaching-good {
-        border: 1px solid rgba(34,197,94,0.35);
-        background: rgba(34,197,94,0.08);
-    }
-    .coaching-okay {
-        border: 1px solid rgba(234,179,8,0.35);
-        background: rgba(234,179,8,0.08);
-    }
-    .coaching-mistake {
-        border: 1px solid rgba(239,68,68,0.35);
-        background: rgba(239,68,68,0.08);
-    }
-
-    .verdict-badge {
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 8px;
-        font-weight: 700;
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        margin-right: 8px;
-    }
-    .verdict-good { background: #166534; color: #4ade80; }
-    .verdict-okay { background: #854d0e; color: #facc15; }
-    .verdict-mistake { background: #991b1b; color: #fca5a5; }
-
-    .concept-tag {
-        display: inline-block;
-        padding: 3px 10px;
-        border-radius: 6px;
-        background: rgba(99,102,241,0.15);
-        color: #a5b4fc;
-        font-size: 0.8rem;
-        font-weight: 600;
-    }
-
-    .playing-card {
-        display: inline-block;
-        width: 78px;
-        height: 110px;
-        background: white;
-        color: #111827;
-        border-radius: 10px;
-        margin-right: 10px;
-        padding: 10px;
-        font-size: 24px;
-        font-weight: 800;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-        vertical-align: top;
-    }
-    </style>
+        <div class="decision-review-card">
+            <div class="decision-review-label">Estimated strength</div>
+            <div class="decision-review-value">
+                {feedback['estimated_strength']:.0%}
+            </div>
+        </div>
+    </div>
     """,
     unsafe_allow_html=True,
 )
+    st.write(f"**You chose:** {feedback['chosen_action']}")
+    for label,value in feedback['mix'].items():
+        st.write(f'{label} — {value}%')
+        st.progress(value/100)
+    st.markdown(f"<div class='coach'><b>Why:</b> {feedback['explanation']}</div>",unsafe_allow_html=True)
+    st.caption('These frequencies are educational heuristics, not exact solver-approved GTO outputs.')
 
+def commit(who,amt):
+    key='pstack' if who=='p' else 'bstack'; paid=min(amt,b(key)); bs(key,b(key)-paid); bs('pot',b('pot')+paid); return paid
 
-# =========================================================
-# HELPERS
-# =========================================================
-POSITIONS = ["UTG", "HJ", "CO", "BTN", "SB", "BB"]
+def bot_new():
+    d=newdeck(); bs('deck',d); bs('ph',[d.pop(),d.pop()]); bs('bh',[d.pop(),d.pop()]); bs('board',[]); bs('street','Preflop'); bs('pot',0.0); bs('over',False); bs('show',False); commit('b',.5); commit('p',1)
+    if strength(b('bh'),[])>.62: commit('b',2); bs('to_call',1.5); bs('msg','Computer raises. Your turn.')
+    else: commit('b',.5); bs('to_call',0); bs('msg','Computer calls. Check or raise.')
 
-VERDICT_EMOJI = {"good": "✅", "okay": "⚠️", "mistake": "❌"}
+def bot_award(winner,text):
+    key='pstack' if winner=='p' else 'bstack'; bs(key,b(key)+b('pot')); pot=b('pot'); bs('pot',0); bs('over',True); bs('hands',b('hands')+1); bs('show',True); bs('msg',text+f' Pot: {pot:.1f} BB'); bs('wins',b('wins')+(1 if winner=='p' else 0))
 
-
-def seat_class(seat_name: str, selected_position: str) -> str:
-    base_class = seat_name.lower()
-    if seat_name == selected_position:
-        return f"seat {base_class} active-seat"
-    return f"seat {base_class}"
-
-
-def parse_hole_cards(hole_cards: str) -> tuple[str, str, str, str]:
-    suits = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
-    card1_rank = hole_cards[0]
-    card1_suit = suits.get(hole_cards[1].lower(), "")
-    card2_rank = hole_cards[2]
-    card2_suit = suits.get(hole_cards[3].lower(), "") if len(hole_cards) > 3 else ""
-    return card1_rank, card1_suit, card2_rank, card2_suit
-
-
-def fetch_scenario() -> None:
-    try:
-        resp = httpx.get(f"{API_BASE}/api/scenarios/next", timeout=5.0)
-        resp.raise_for_status()
-        st.session_state.scenario = resp.json()
-        st.session_state.show_result = False
-        st.session_state.last_result = None
-        st.session_state.user_action = None
-        st.session_state.action_start_time = time.time()
-    except httpx.HTTPError as e:
-        st.error(f"Could not load scenario: {e}")
-
-
-def submit_action(action: str) -> None:
-    scenario = st.session_state.scenario
-    if scenario is None:
-        return
-
-    response_time_ms = None
-    if st.session_state.action_start_time:
-        response_time_ms = int(
-            (time.time() - st.session_state.action_start_time) * 1000
-        )
-
-    prev_outcome = None
-    if st.session_state.verdicts:
-        prev_outcome = st.session_state.verdicts[-1]
-
-    try:
-        resp = httpx.post(
-            f"{API_BASE}/api/evaluate",
-            json={
-                "scenario_id": scenario["id"],
-                "username": st.session_state.username,
-                "action": action,
-                "response_time_ms": response_time_ms,
-                "prev_outcome": prev_outcome,
-            },
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        st.session_state.last_result = result
-        st.session_state.user_action = action
-        st.session_state.show_result = True
-        st.session_state.scenarios_completed += 1
-        st.session_state.verdicts.append(result["coaching"]["verdict"])
-    except httpx.HTTPError as e:
-        st.error(f"Evaluation failed: {e}")
-
-
-def reset_session() -> None:
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    initialize_session()
-
-
-# =========================================================
-# LOGIN GATE
-# =========================================================
-if not st.session_state.logged_in:
-    st.markdown(
-        '<div class="main-title">♠️ Poker AI Coach</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="subtitle">Enter a username to start practicing.</div>',
-        unsafe_allow_html=True,
-    )
-    username = st.text_input("Username", max_chars=30)
-    if st.button("Start Training", type="primary"):
-        if username.strip():
-            st.session_state.username = username.strip()
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.warning("Please enter a username.")
-    st.stop()
-
-
-# =========================================================
-# HEADER
-# =========================================================
-st.markdown(
-    '<div class="main-title">♠️ Poker AI Coach</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="subtitle">'
-    f"Playing as <strong>{st.session_state.username}</strong> · "
-    "Practice poker decisions and review your session activity."
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-coach_tab, session_tab = st.tabs(["Poker Coach", "My Session"])
-
-
-# =========================================================
-# SIDEBAR
-# =========================================================
-with st.sidebar:
-    st.header("Controls")
-
-    if st.button("Deal New Scenario", use_container_width=True, type="primary"):
-        fetch_scenario()
-        st.rerun()
-
-    if st.button("Reset Session", use_container_width=True):
-        reset_session()
-        st.rerun()
-
-    st.divider()
-    st.caption(
-        f"Logged in as **{st.session_state.username}** · "
-        f"Scenarios completed: {st.session_state.scenarios_completed}"
-    )
-
-
-# =========================================================
-# POKER COACH TAB
-# =========================================================
-with coach_tab:
-    scenario = st.session_state.scenario
-
-    if scenario is None:
-        st.info("Click **Deal New Scenario** in the sidebar to begin.")
-        st.stop()
-
-    left_col, right_col = st.columns([1.45, 1])
-
-    with left_col:
-        st.subheader("Table View")
-
-        position = scenario["position"]
-        pot_size = scenario["pot_size"]
-
-        table_html = f"""
-<div class="poker-table">
-    <div class="{seat_class('CO', position)}">CO<br>100 bb</div>
-    <div class="{seat_class('HJ', position)}">HJ<br>100 bb</div>
-    <div class="{seat_class('BTN', position)}">BTN<br>100 bb</div>
-    <div class="{seat_class('UTG', position)}">UTG<br>100 bb</div>
-    <div class="{seat_class('BB', position)}">BB<br>99 bb</div>
-    <div class="{seat_class('SB', position)}">SB<br>99.5 bb</div>
-    <div class="pot">POT<br>{pot_size:.1f} bb</div>
-</div>
-"""
-        st.markdown(table_html, unsafe_allow_html=True)
-
-        card1_rank, card1_suit, card2_rank, card2_suit = parse_hole_cards(
-            scenario["hole_cards"]
-        )
-
-        st.markdown("#### Your Hole Cards")
-        st.markdown(
-            f'<div class="playing-card">{card1_rank}<br><br>{card1_suit}</div>'
-            f'<div class="playing-card">{card2_rank}<br><br>{card2_suit}</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(f"**Board:** {scenario['board']}")
-
-    with right_col:
-        st.subheader("Decision Details")
-
-        st.markdown(
-            f"""
-<div class="info-card">
-    <strong>Position:</strong> {scenario['position']}<br>
-    <strong>Opponent action:</strong> {scenario['opponent_action']}<br>
-    <strong>Stack:</strong> {scenario['stack_size']:.0f} big blinds<br>
-    <strong>Pot:</strong> {scenario['pot_size']:.1f} big blinds
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-        if not st.session_state.show_result:
-            st.markdown("#### Choose your action:")
-            action_cols = st.columns(3)
-            with action_cols[0]:
-                if st.button("Raise", use_container_width=True):
-                    submit_action("raise")
-                    st.rerun()
-            with action_cols[1]:
-                if st.button("Call", use_container_width=True):
-                    submit_action("call")
-                    st.rerun()
-            with action_cols[2]:
-                if st.button("Fold", use_container_width=True):
-                    submit_action("fold")
-                    st.rerun()
-
-            actions_with_bet = ["check", "bet"]
-            extra_cols = st.columns(2)
-            with extra_cols[0]:
-                if st.button("Check", use_container_width=True):
-                    submit_action("check")
-                    st.rerun()
-            with extra_cols[1]:
-                if st.button("Bet", use_container_width=True):
-                    submit_action("bet")
-                    st.rerun()
-
-        if st.session_state.show_result and st.session_state.last_result:
-            result = st.session_state.last_result
-            comparison = result["comparison"]
-            coaching = result["coaching"]
-            gto = comparison["gto_strategy"]
-
-            st.markdown("### GTO Action Frequencies")
-            for action_name, freq in gto.items():
-                st.write(f"{action_name.capitalize()} — {freq:.0f}%")
-                st.progress(freq / 100)
-
-            verdict = coaching["verdict"]
-            emoji = VERDICT_EMOJI.get(verdict, "")
-            card_class = f"coaching-{verdict}"
-            badge_class = f"verdict-{verdict}"
-
-            st.markdown(
-                f"""
-<div class="coaching-card {card_class}">
-    <div style="margin-bottom: 8px;">
-        <span class="verdict-badge {badge_class}">{emoji} {verdict}</span>
-        <span class="concept-tag">{coaching['concept']}</span>
-    </div>
-    <p style="margin: 6px 0;"><strong>You chose:</strong> {st.session_state.user_action}</p>
-    <p style="margin: 6px 0;">{coaching['summary']}</p>
-    <p style="margin: 6px 0; opacity: 0.85;"><em>{coaching['advice']}</em></p>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-            if st.button("Next Scenario →", type="primary", use_container_width=True):
-                fetch_scenario()
-                st.rerun()
-
-
-# =========================================================
-# MY SESSION TAB
-# =========================================================
-with session_tab:
-    st.header("My Session")
-
-    session_minutes = int(
-        (time.time() - st.session_state.session_start) / 60
-    )
-
-    verdicts = st.session_state.verdicts
-    good_count = verdicts.count("good")
-    mistake_count = verdicts.count("mistake")
-    total = len(verdicts)
-
-    metric1, metric2, metric3, metric4 = st.columns(4)
-
-    with metric1:
-        st.metric("Scenarios analyzed", total)
-
-    with metric2:
-        st.metric("Session length", f"{session_minutes} min")
-
-    with metric3:
-        st.metric("Good decisions", good_count)
-
-    with metric4:
-        accuracy = f"{good_count / total:.0%}" if total > 0 else "—"
-        st.metric("Accuracy", accuracy)
-
-    if total > 0:
-        st.markdown("### Decision History")
-        for i, v in enumerate(reversed(verdicts), 1):
-            emoji = VERDICT_EMOJI.get(v, "")
-            st.write(f"{emoji} Scenario {total - i + 1}: **{v}**")
-
-    st.markdown("### Current Session Status")
-
-    if session_minutes >= 60:
-        st.warning(
-            "You have been practicing for at least one hour. "
-            "Consider taking a break."
-        )
-    elif total >= 25:
-        st.warning(
-            "You have completed many scenarios in one session. "
-            "A short break may be helpful."
-        )
+def advance():
+    if b('street')=='Preflop': b('board').extend([b('deck').pop() for _ in range(3)]); bs('street','Flop')
+    elif b('street')=='Flop': b('board').append(b('deck').pop()); bs('street','Turn')
+    elif b('street')=='Turn': b('board').append(b('deck').pop()); bs('street','River')
     else:
-        st.success(
-            "No concerning session pattern has been detected."
-        )
+        # simplified showdown strength
+        if strength(b('ph'),b('board'))>=strength(b('bh'),b('board')): bot_award('p','You win at showdown.')
+        else: bot_award('b','Computer wins at showdown.')
+        return
+    bs('to_call',0)
+    if random.random() < strength(b('bh'),b('board'))*.55:
+        bet=commit('b',max(1,round(b('pot')*.5,1))); bs('to_call',bet); bs('msg',f'{b("street")}: computer bets {bet:.1f} BB.')
+    else: bs('msg',f'{b("street")}: computer checks. Your turn.')
 
-    st.caption(
-        "This session summary is not a diagnosis. It only reports activity "
-        "inside this practice app."
-    )
+def bot_action(action,f=.5):
+    feedback=coach_feedback(b('ph'),b('board'),b('pot'),b('to_call'),action,b('street'))
+    bs('feedback',feedback); bs('decision_scores',b('decision_scores')+[feedback['score']])
+    if action=='fold': bs('folds',b('folds')+1); bot_award('b','You folded.'); return
+    if action=='call':
+        if b('to_call')>0: bs('calls',b('calls')+1); commit('p',b('to_call')); bs('to_call',0)
+        advance(); return
+    bs('raises',b('raises')+1); amt=commit('p',b('to_call')+max(1,round(b('pot')*f,1))); bs('to_call',0)
+    if random.random()>strength(b('bh'),b('board'))+.12: bot_award('p','Computer folded.')
+    else: commit('b',amt); advance()
+
+def render_table(top_name,top_stack,top_cards,board,bottom_cards,bottom_name,bottom_stack,street,pot):
+    st.markdown(f'''<div class="table"><div class="name">{top_name} · {top_stack:.1f} BB</div><div class="cards">{''.join(top_cards)}</div><div class="board">{''.join(board)}</div><div class="pill">{street} · Pot {pot:.1f} BB</div><div class="cards">{''.join(bottom_cards)}</div><div class="name">{bottom_name} · {bottom_stack:.1f} BB</div></div>''',unsafe_allow_html=True)
+
+if mode.startswith('🤖'):
+    init_bot()
+    if st.sidebar.button('🎴 New Hand',type='primary',use_container_width=True,disabled=not b('over')): bot_new(); st.rerun()
+    if st.sidebar.button('Reset computer match',use_container_width=True):
+        for k in list(st.session_state):
+            if k.startswith('bot_'): del st.session_state[k]
+        st.rerun()
+    m=st.columns(5); vals=[('You',f'{b("pstack"):.1f} BB'),('Computer',f'{b("bstack"):.1f} BB'),('Pot',f'{b("pot"):.1f} BB'),('Hands',b('hands')),('Wins',b('wins'))]
+    for c,(x,y) in zip(m,vals): c.metric(x,y)
+    l,r=st.columns([1.55,1]);
+    with l:
+        render_table('COMPUTER',b('bstack'),[card_html(c,not b('show')) for c in b('bh')] or [card_html(None),card_html(None)],[card_html(c) for c in b('board')]+[card_html(None)]*(5-len(b('board'))),[card_html(c) for c in b('ph')] or [card_html(None),card_html(None)],'YOU',b('pstack'),b('street'),b('pot'))
+    with r:
+        st.markdown(f'<div class="status"><b>{b("msg")}</b></div>',unsafe_allow_html=True)
+        if not b('over'):
+            c1,c2,c3=st.columns(3)
+            if c1.button('Fold',use_container_width=True): bot_action('fold'); st.rerun()
+            if c2.button(f'Call {b("to_call"):.1f}' if b('to_call') else 'Check',type='primary',use_container_width=True): bot_action('call'); st.rerun()
+            if c3.button('½ Pot',use_container_width=True): bot_action('bet',.5); st.rerun()
+            c4,c5=st.columns(2)
+            if c4.button('¾ Pot',use_container_width=True): bot_action('bet',.75); st.rerun()
+            if c5.button('Pot',use_container_width=True): bot_action('bet',1); st.rerun()
+        else: st.info('Start a new hand.')
+        if coach_on:
+            show_learning(b('feedback'))
+
+# ---------- MULTIPLAYER ----------
+else:
+    for k,v in {'room':'','token':'','name':'','connected':False}.items():
+        if 'mp_'+k not in st.session_state: st.session_state['mp_'+k]=v
+    st.sidebar.subheader('Multiplayer lobby')
+    name=st.sidebar.text_input('Display name',value=st.session_state.mp_name or 'Player')
+    tab1,tab2=st.sidebar.tabs(['Create','Join'])
+    with tab1:
+        if st.button('Create room',use_container_width=True):
+            try:
+                x=requests.post(API+'/create',json={'player_name':name},timeout=5).json(); st.session_state.mp_room=x['room_code']; st.session_state.mp_token=x['player_token']; st.session_state.mp_name=name; st.session_state.mp_connected=True; st.rerun()
+            except Exception as e: st.error(f'Backend unavailable: {e}')
+    with tab2:
+        code=st.text_input('Room code').upper()
+        if st.button('Join room',use_container_width=True):
+            try:
+                res=requests.post(API+'/join',json={'room_code':code,'player_name':name},timeout=5); res.raise_for_status(); x=res.json(); st.session_state.mp_room=x['room_code']; st.session_state.mp_token=x['player_token']; st.session_state.mp_name=name; st.session_state.mp_connected=True; st.rerun()
+            except Exception as e: st.error(f'Could not join: {e}')
+    if not st.session_state.mp_connected:
+        st.info('Create a room or join with a room code. The FastAPI backend must be running.')
+    else:
+        room=st.session_state.mp_room; token=st.session_state.mp_token
+        st.sidebar.success(f'Room: {room}')
+        # Browser WebSocket: reload only when server pushes a state change.
+        components.html(f'''<script>
+        const key='poker_ws_last_{room}';
+        const ws=new WebSocket('{WS}/ws/{room}');
+        ws.onopen=()=>ws.send('ready');
+        ws.onmessage=(e)=>{{const now=Date.now().toString(); if(sessionStorage.getItem(key)!==now){{sessionStorage.setItem(key,now); window.parent.location.reload();}}}};
+        setInterval(()=>{{if(ws.readyState===1) ws.send('ping')}},20000);
+        </script>''',height=0)
+        try:
+            state=requests.get(f'{API}/state/{room}/{token}',timeout=5).json()
+        except Exception as e:
+            st.error(f'Cannot read room: {e}'); st.stop()
+        players=state['players']; you=players[0]; opp=players[1] if len(players)>1 else {'name':'Waiting…','stack':100,'hole':[],'wins':0}
+        m=st.columns(5); vals=[('You',f"{you['stack']:.1f} BB"),('Opponent',f"{opp['stack']:.1f} BB"),('Pot',f"{state['pot']:.1f} BB"),('Your wins',you.get('wins',0)),('Room',room)]
+        for c,(x,y) in zip(m,vals): c.metric(x,y)
+        l,r=st.columns([1.55,1])
+        with l:
+            render_table(opp['name'],opp['stack'],[card_html(c) for c in opp.get('hole',[])] or [card_html(None),card_html(None)],[card_html(c) for c in state.get('board',[])]+[card_html(None)]*(5-len(state.get('board',[]))),[card_html(c) for c in you.get('hole',[])] or [card_html(None),card_html(None)],you['name'],you['stack'],state['street'],state['pot'])
+        with r:
+            st.markdown(f'<div class="status"><b>{state["message"]}</b></div>',unsafe_allow_html=True)
+            def send(action,amount=0):
+                res=requests.post(API+'/action',json={'room_code':room,'player_token':token,'action':action,'amount':amount},timeout=5)
+                if not res.ok: st.error(res.text)
+                else: st.rerun()
+            if len(players)<2: st.warning('Waiting for Player 2 to join.')
+            elif state['hand_over']:
+                if st.button('🎴 Start New Hand',type='primary',use_container_width=True):
+                    requests.post(API+'/new-hand',json={'room_code':room,'player_token':token,'action':'new'},timeout=5); st.rerun()
+            elif state['turn_is_yours']:
+                tc=state.get('to_call',0); c1,c2,c3=st.columns(3)
+                if c1.button('Fold',use_container_width=True): send('fold')
+                if c2.button(f'Call {tc:.1f}' if tc else 'Check',type='primary',use_container_width=True): send('call' if tc else 'check')
+                if c3.button('½ Pot',use_container_width=True): send('bet',max(1,state['pot']*.5))
+                c4,c5=st.columns(2)
+                if c4.button('¾ Pot',use_container_width=True): send('bet',max(1,state['pot']*.75))
+                if c5.button('Pot',use_container_width=True): send('bet',max(1,state['pot']))
+            else: st.info(f"Waiting for {opp['name']}… This page updates automatically through WebSockets.")
+            if coach_on:
+                show_learning(state.get('learning_feedback'),title='Your Private Decision Review')
+
+
+st.divider()
+with st.expander('📚 Learning Center: core poker concepts'):
+    t1,t2,t3,t4=st.tabs(['Pot odds','Position','Bet sizing','GTO-style thinking'])
+    with t1:
+        st.write('Pot odds compare the amount you must call with the total pot after calling. A call generally needs enough equity to justify that price.')
+        st.code('required equity = amount to call / (current pot + amount to call)')
+    with t2:
+        st.write('Acting later gives you more information. In heads-up poker, the dealer acts first preflop but last on later streets.')
+    with t3:
+        st.write('Smaller bets risk fewer chips and can be used frequently. Larger bets apply more pressure but usually need stronger hands or carefully selected bluffs.')
+    with t4:
+        st.write('A GTO-style strategy can mix actions instead of always choosing one move. The percentages in this prototype demonstrate that idea, but they are simplified heuristics until your trained strategy model is connected.')
