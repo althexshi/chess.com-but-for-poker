@@ -9,6 +9,8 @@ The optional Learning Coach privately reviews each decision after it is made. It
 
 ## Install
 
+If you've already run `pip install -e ".[dev]"` from the project root, you have everything you need — skip to Run. Otherwise, from this directory:
+
 ```powershell
 python -m pip install -r requirements.txt
 ```
