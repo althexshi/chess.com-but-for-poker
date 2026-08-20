@@ -7,3 +7,7 @@ __pycache__/
 .ipynb_checkpoints/
 venv/
 *.db
+.env
+.env.*
+CLAUDE.md
+poetry.lock
